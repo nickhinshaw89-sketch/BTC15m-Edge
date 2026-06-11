@@ -115,7 +115,10 @@ def main():
         sid = r.get("strategy_id", "")
         key = (day, sid)
         outcome = (r.get("truth_outcome") or "").upper()
-        net = fnum(r.get("truth_net_c"))
+        truth_net = r.get("truth_net_c")
+        if outcome not in {"WIN", "LOSS"} or truth_net in (None, ""):
+            continue
+        net = fnum(truth_net)
 
         d[key][0] += 1
         d[key][1] += 1 if outcome == "WIN" else 0
@@ -128,7 +131,8 @@ def main():
         fields2 = [
             "day","strategy_id","trades","wins","losses","win_rate",
             "truth_net_c","avg_truth_net_c",
-            "kalshi_checked","kalshi_match","kalshi_match_rate"
+            "kalshi_checked","kalshi_match","kalshi_match_rate",
+            "source_truth","truth_required"
         ]
         w = csv.DictWriter(f, fieldnames=fields2)
         w.writeheader()
@@ -145,6 +149,8 @@ def main():
                 "kalshi_checked": checked,
                 "kalshi_match": matched,
                 "kalshi_match_rate": round(matched / checked, 4) if checked else "",
+                "source_truth": "kalshi",
+                "truth_required": 1,
             })
 
 if __name__ == "__main__":

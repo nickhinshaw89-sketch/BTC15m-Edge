@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import csv
 import fcntl
 import json
 import os
@@ -14,6 +13,7 @@ from .csvlog import CsvLogger
 from .kalshi_auth import load_private_key, websocket_headers
 from .market_source import load_market_spec
 from .order_client import KalshiOrderClient
+from .promotion_gate import evaluate_promoted_gate
 from .quote_fallback import fallback_best_quote
 from .rule_kernel import (
     STRATEGY_ID,
@@ -53,24 +53,7 @@ ACTIVE_EDGE_KEYS = {
 }
 
 def promoted_gate_open():
-    if not PROMOTED_RULES_PATH.exists() or PROMOTED_RULES_PATH.stat().st_size == 0:
-        return False, "promoted_rules_missing_or_empty"
-    try:
-        with PROMOTED_RULES_PATH.open(newline="") as fh:
-            rows = list(csv.DictReader(fh))
-    except Exception:
-        return False, "promoted_rules_unreadable"
-    if not rows:
-        return False, "promoted_rules_no_rows"
-    for r in rows:
-        status = (r.get("status") or "ACTIVE").strip().upper()
-        rid = (r.get("promoted_strategy_id") or r.get("rule_id") or "").strip()
-        edge_key = (r.get("edge_key") or "").strip()
-        net = float(r.get("net_c") or 0)
-        trades = int(float(r.get("trades") or 0))
-        if rid and edge_key in ACTIVE_EDGE_KEYS and status not in {"DISABLED", "REJECTED", "CUT"} and trades >= 27 and net > 0:
-            return True, "promoted_rules_active"
-    return False, "promoted_rules_no_active_positive_rules"
+    return evaluate_promoted_gate(PROMOTED_RULES_PATH, ACTIVE_EDGE_KEYS)
 
 
 def write_health(logger, cfg, market, kstate, bstate, counters, last_error):
