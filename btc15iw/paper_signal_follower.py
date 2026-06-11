@@ -18,8 +18,20 @@ APPROVED = {
     },
 }
 
+MAX_SIGNAL_AGE_SEC = 30.0
+
 def utcnow():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def utcnow_dt():
+    return datetime.now(timezone.utc)
+
+def parse_utc(ts):
+    try:
+        s = str(ts).replace("Z", "+00:00")
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return None
 
 def num(x):
     try:
@@ -30,11 +42,8 @@ def num(x):
         return None
 
 def hour_utc(ts):
-    try:
-        s = str(ts).replace("Z", "+00:00")
-        return datetime.fromisoformat(s).astimezone(timezone.utc).hour
-    except Exception:
-        return None
+    parsed = parse_utc(ts)
+    return parsed.hour if parsed is not None else None
 
 def load_seen(path):
     p = Path(path)
@@ -64,38 +73,67 @@ def append_csv(path, row, fields):
             w.writeheader()
         w.writerow({k: row.get(k, "") for k in fields})
 
-def check_row(row):
+def evaluate_row(row, now=None):
+    diagnostics = {
+        "source_sec_to_close": "",
+        "signal_age_sec": "",
+        "effective_ttc_sec": "",
+    }
+
     sid = row.get("strategy_id", "")
     rule = APPROVED.get(sid)
     if not rule:
-        return False, "strategy_not_approved"
+        return False, "strategy_not_approved", diagnostics
 
     side = row.get("side", "").upper()
     if side != rule["side"]:
-        return False, "side_mismatch"
+        return False, "side_mismatch", diagnostics
 
     gap = num(row.get("gap_usd"))
     spread = num(row.get("spread_c"))
     ask = num(row.get("entry_ask_c"))
-    h = hour_utc(row.get("ts_utc"))
+    source_ttc = num(row.get("sec_to_close"))
+    signal_ts = parse_utc(row.get("ts_utc"))
+    now = now or utcnow_dt()
+    h = signal_ts.hour if signal_ts is not None else None
+
+    if source_ttc is not None:
+        diagnostics["source_sec_to_close"] = source_ttc
 
     if gap is None:
-        return False, "missing_gap"
+        return False, "missing_gap", diagnostics
     if spread is None:
-        return False, "missing_spread"
+        return False, "missing_spread", diagnostics
     if ask is None:
-        return False, "missing_entry_ask"
+        return False, "missing_entry_ask", diagnostics
     if h is None:
-        return False, "missing_hour"
+        return False, "missing_hour", diagnostics
+    if source_ttc is None:
+        return False, "missing_ttc", diagnostics
 
+    signal_age_sec = (now - signal_ts).total_seconds()
+    effective_ttc_sec = source_ttc - signal_age_sec
+    diagnostics["signal_age_sec"] = signal_age_sec
+    diagnostics["effective_ttc_sec"] = effective_ttc_sec
+
+    if signal_age_sec < 0 or signal_age_sec > MAX_SIGNAL_AGE_SEC:
+        return False, "stale_signal_rejected", diagnostics
+    if not (600 <= effective_ttc_sec <= 900):
+        return False, "effective_ttc_rejected", diagnostics
+    if not (50 <= ask <= 59):
+        return False, "entry_rejected", diagnostics
+    if not (0 <= spread <= rule["spread_max"]):
+        return False, "spread_rejected", diagnostics
     if not (rule["gap_min"] <= gap < rule["gap_max"]):
-        return False, "gap_rejected"
-    if spread > rule["spread_max"]:
-        return False, "spread_rejected"
+        return False, "gap_rejected", diagnostics
     if h in rule["cut_hours_utc"]:
-        return False, "hour_cut_rejected"
+        return False, "hour_cut_rejected", diagnostics
 
-    return True, "approved"
+    return True, "approved", diagnostics
+
+def check_row(row):
+    ok, reason, _diagnostics = evaluate_row(row)
+    return ok, reason
 
 def main():
     cfg = load_config()
@@ -108,7 +146,7 @@ def main():
     order_log = state_dir / "orders.csv"
     health_file = state_dir / "health.json"
 
-    fields = ["ts_utc","follower_ts_utc","decision","reason","strategy_id","ticker","side","entry_ask_c","entry_bid_c","spread_c","gap_usd","hour_utc","dedup_key","place_orders"]
+    fields = ["ts_utc","follower_ts_utc","decision","reason","strategy_id","ticker","side","entry_ask_c","entry_bid_c","spread_c","gap_usd","hour_utc","source_sec_to_close","signal_age_sec","effective_ttc_sec","dedup_key","place_orders"]
     order_fields = ["ts_utc","strategy_id","ticker","side","contracts","limit_price_c","http_status","order_id","client_order_id","raw"]
 
     private_key = None
@@ -146,7 +184,8 @@ def main():
                     if key in seen:
                         continue
 
-                    ok, reason = check_row(row)
+                    evaluation_time = utcnow_dt()
+                    ok, reason, diagnostics = evaluate_row(row, now=evaluation_time)
                     h = hour_utc(row.get("ts_utc"))
                     out = dict(row)
                     out.update({
@@ -154,6 +193,9 @@ def main():
                         "decision": "TRADE" if ok else "SKIP",
                         "reason": reason,
                         "hour_utc": h if h is not None else "",
+                        "source_sec_to_close": diagnostics["source_sec_to_close"],
+                        "signal_age_sec": diagnostics["signal_age_sec"],
+                        "effective_ttc_sec": diagnostics["effective_ttc_sec"],
                         "place_orders": int(cfg.place_orders),
                     })
                     append_csv(decision_log, out, fields)
