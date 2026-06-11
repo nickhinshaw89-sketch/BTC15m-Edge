@@ -1,0 +1,17 @@
+config.env
+*.env
+*.pem
+*.key
+*private*
+*secret*
+*credential*
+__pycache__/
+*.pyc
+config.env*
+config.promoted.env
+*.bak*
+__pycache__/
+*.py[cod]
+*.broken*
+*.orig
+*.tmp
